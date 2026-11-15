@@ -1,0 +1,8 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {initialProducts,isVisible,filterProducts,updateStock} from './inventory.mjs';
+test('sold-out product disappears everywhere and returns when restocked',()=>{const products=structuredClone(initialProducts);assert.equal(filterProducts(products).length,4);const sold=updateStock(products,{'apple-imac':{stock:0,active:true}});assert.equal(filterProducts(sold,{category:'Desktops'}).length,0);assert.equal(filterProducts(sold,{query:'iMac'}).length,0);assert.equal(filterProducts(sold,{condition:'Refurbished'}).some(p=>p.id==='apple-imac'),false);assert.equal(isVisible(sold.find(p=>p.id==='apple-imac')),false);assert.equal(filterProducts(updateStock(sold,{'apple-imac':{stock:5,active:true}}),{category:'Desktops'}).length,1);});
+test('inactive and discontinued stock remains hidden',()=>{assert.equal(isVisible({...initialProducts[0],active:false}),false);assert.equal(isVisible({...initialProducts[0],discontinued:true}),false);assert.equal(isVisible({...initialProducts[0],stock:-1}),false);});
+test('search, condition and price sorting compose without changing data',()=>{const before=JSON.stringify(initialProducts);const result=filterProducts(initialProducts,{condition:'Refurbished',category:'Laptops',query:'INTEL',sort:'price-low'});assert.deepEqual(result.map(p=>p.price),[22500,26900]);assert.equal(JSON.stringify(initialProducts),before);});
+test('all stock depleted produces no public listings',()=>{assert.equal(filterProducts(initialProducts.map(p=>({...p,stock:0}))).length,0);});
+test('stock edits reject invalid quantities',()=>{for(const stock of [-1,1.5,NaN,100000])assert.throws(()=>updateStock(initialProducts,{'apple-imac':{stock,active:true}}));});

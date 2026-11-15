@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,readFile,writeFile,rm} from 'node:fs/promises';
+import {resolve,sep} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {request as httpRequest} from 'node:http';
+import {createApplication} from './backend.mjs';
+const root=fileURLToPath(new URL('.',import.meta.url));
+test('temporary HTTPS domain, secure cookies and persistent-disk initialization',async t=>{
+  const dir=await mkdtemp(resolve(root,'.test-hosting-'));
+  const seedDir=resolve(dir,'seed'),dataDir=resolve(dir,'runtime');
+  const seed=await createApplication({root,dataDir:seedDir,bootstrapPassword:'Hosting-test-password-73'});
+  const saved=JSON.parse(await readFile(resolve(seedDir,'catalogue.json'),'utf8'));
+  saved.products[0].name='Packaged catalogue snapshot';
+  saved.products[0].image='uploads/11111111-1111-1111-1111-111111111111.jpg';
+  await writeFile(resolve(seedDir,saved.products[0].image),await readFile(resolve(root,'assets/laptop-dell.jpg')));
+  await writeFile(resolve(seedDir,'catalogue.json'),JSON.stringify(saved));
+  const app=await createApplication({root,dataDir,seedDir,publicOrigin:'https://client-review.example'});
+  await new Promise(r=>app.server.listen(0,'127.0.0.1',r));
+  const base='http://127.0.0.1:'+app.server.address().port;
+  t.after(async()=>{await new Promise(r=>app.server.close(r));if(resolve(dir).startsWith(resolve(root)+sep+'.test-hosting-'))await rm(dir,{recursive:true,force:true});});
+  // Send the exact Host header a reverse proxy forwards; fetch may normalize it.
+  const request=(path,options={})=>new Promise((resolve,reject)=>{const req=httpRequest(base+path,{method:options.method||'GET',headers:{Host:'client-review.example',Origin:'https://client-review.example','Content-Type':'application/json',...options.headers}},response=>{const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('end',()=>{const content=Buffer.concat(chunks).toString();resolve({status:response.statusCode,headers:{get:name=>{const value=response.headers[name.toLowerCase()];return Array.isArray(value)?value.join(', '):value;}},json:async()=>JSON.parse(content)});});});req.on('error',reject);req.end(options.body);});
+  await t.test('configured HTTPS domain works behind a proxy',async()=>{assert.equal((await request('/')).status,200);assert.equal((await request('/admin')).status,200);assert.equal((await request('/healthz')).status,200);assert.equal((await request('/',{headers:{Host:'unrelated.example'}})).status,403);});
+  let cookie,csrf;
+  await t.test('packaged administrator works with secure cookies and correct origin',async()=>{assert.equal(app.initialCredential,undefined);const login=await request('/api/login',{method:'POST',body:JSON.stringify({username:'admin',password:'Hosting-test-password-73'})});assert.equal(login.status,200);assert.match(login.headers.get('set-cookie'),/; Secure/);cookie=login.headers.get('set-cookie').split(';')[0];csrf=(await login.json()).csrf;const bad=await request('/api/admin/categories',{method:'POST',headers:{Origin:'https://another.example',Cookie:cookie,'X-CSRF-Token':csrf},body:JSON.stringify({name:'Blocked category'})});assert.equal(bad.status,403);const valid=await request('/api/admin/categories',{method:'POST',headers:{Cookie:cookie,'X-CSRF-Token':csrf},body:JSON.stringify({name:'Hosted category'})});assert.equal(valid.status,200);});
+  await t.test('catalogue and uploads are seeded onto a persistent disk',async()=>{const catalogue=await (await request('/api/catalogue')).json();assert.equal(catalogue.products[0].name,'Packaged catalogue snapshot');assert.equal((await request('/'+saved.products[0].image)).status,200);assert.equal((await request('/private/admin.json')).status,404);assert.equal((await request('/.env')).status,404);});
+  await t.test('redeployment does not overwrite the runtime catalogue',async()=>{const reloaded=await createApplication({root,dataDir,seedDir,publicOrigin:'https://client-review.example'});const runtime=JSON.parse(await readFile(resolve(dataDir,'catalogue.json'),'utf8'));assert.ok(runtime.categories.includes('Hosted category'));assert.equal(reloaded.initialCredential,undefined);});
+  await t.test('unsafe public-origin configuration fails at startup',async()=>{await assert.rejects(createApplication({root,dataDir,publicOrigin:'http://public.example'}),/HTTPS/);await assert.rejects(createApplication({root,dataDir,publicOrigin:'https://public.example/subfolder'}),/without a path/);});
+});
